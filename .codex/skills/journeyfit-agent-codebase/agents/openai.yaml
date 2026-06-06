@@ -1,0 +1,4 @@
+interface:
+  display_name: "JourneyFit Agent Codebase"
+  short_description: "Code the JourneyFit Hermes agent."
+  default_prompt: "Use this skill when changing the JourneyFit Hermes agent."
