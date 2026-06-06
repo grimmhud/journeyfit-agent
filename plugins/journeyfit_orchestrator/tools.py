@@ -589,7 +589,7 @@ def _infer_profile_hints(context: OrchestrationContext) -> dict[str, Any]:
             profile["age"] = int(match.group(1))
 
     if "weight_kg" not in profile or profile.get("weight_kg") in (None, ""):
-        match = re.search(r"\b(\d{2,3}(?:[.,]\d+)?)\s*kg\b", normalized)
+        match = re.search(r"\b(\d{2,3}(?:[.,]\d+)?)\s*(?:kg|kgs|quilo|quilos|kilo|kilos)\b", normalized)
         if match:
             profile["weight_kg"] = float(match.group(1).replace(",", "."))
 

@@ -253,6 +253,26 @@ def test_orchestration_progresses_to_specialists_with_minimum_context():
     assert result["renderable_plan"]["nutrition"]["status"] == "unavailable"
 
 
+def test_orchestration_understands_weight_written_as_quilos():
+    ctx = SimpleNamespace(llm=_FakeLLM())
+    result = json.loads(
+        run_journeyfit_orchestration(
+            ctx,
+            {
+                "user_message": "gostaria de um treino, tenho 28 anos, peso 78 quilos e consigo treinar 3 dias por semana",
+                "user_profile": {},
+                "conversation_history": [],
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert result["mode"] == "plan_ready"
+    assert result["follow_up_questions"] == []
+    assert result["selected_agents"] == ["personal_trainer"]
+    assert result["renderable_plan"]["training"]["weekly_frequency"] == 3
+
+
 def test_orchestration_maps_specialist_outputs_to_renderable_v0():
     ctx = SimpleNamespace(llm=_FakeLLMRenderable())
     result = json.loads(
