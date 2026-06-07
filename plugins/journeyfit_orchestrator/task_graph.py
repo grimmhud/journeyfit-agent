@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 
 TaskStatus = Literal["pending", "running", "done", "failed", "skipped"]
-TaskType = Literal["intake", "domain_plan", "validation", "revision", "schedule", "review", "synthesis"]
+TaskType = Literal["intake", "domain_plan", "existing_plan_conversation", "validation", "revision", "schedule", "review", "synthesis"]
 
 
 @dataclass

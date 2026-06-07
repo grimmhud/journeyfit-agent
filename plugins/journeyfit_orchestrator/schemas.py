@@ -29,6 +29,48 @@ JOURNEYFIT_ORCHESTRATE_SCHEMA: Dict[str, Any] = {
 }
 
 
+JOURNEYFIT_PLAN_STATUS_SCHEMA: Dict[str, Any] = {
+    "name": "journeyfit_plan_status",
+    "description": (
+        "Check whether the current JourneyFit user/session already has a saved training or nutrition plan. "
+        "Use before suggesting creation of a new workout or diet plan."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "user_profile": {"type": "object", "description": "Perfil estruturado do usuario, se conhecido."},
+            "user_id": {"type": "string", "description": "ID explicito do usuario, se conhecido."},
+            "session_id": {"type": "string", "description": "ID explicito da sessao, se conhecido."},
+        },
+        "additionalProperties": False,
+    },
+}
+
+
+JOURNEYFIT_CURRENT_PLAN_SCHEMA: Dict[str, Any] = {
+    "name": "journeyfit_current_plan",
+    "description": (
+        "Read the current saved JourneyFit plan for a specialist. "
+        "Personal trainer should request domain='training'; nutritionist should request domain='nutrition'."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "domain": {
+                "type": "string",
+                "enum": ["training", "nutrition", "both"],
+                "description": "Which part of the saved plan to read.",
+            },
+            "user_profile": {"type": "object", "description": "Perfil estruturado do usuario, se conhecido."},
+            "user_id": {"type": "string", "description": "ID explicito do usuario, se conhecido."},
+            "session_id": {"type": "string", "description": "ID explicito da sessao, se conhecido."},
+        },
+        "required": ["domain"],
+        "additionalProperties": False,
+    },
+}
+
+
 _LIST_STRING_SCHEMA: Dict[str, Any] = {
     "type": "array",
     "items": {"type": "string"},
@@ -92,6 +134,20 @@ TRAINING_SCHEMA: Dict[str, Any] = {
     "additionalProperties": True,
 }
 
+TRAINING_CONVERSATION_SCHEMA: Dict[str, Any] = {
+    "name": "journeyfit.training_conversation",
+    "type": "object",
+    "properties": {
+        "answer": {"type": "string"},
+        "referenced_plan": {"type": "object"},
+        "safety_notes": _LIST_STRING_SCHEMA,
+        "follow_up_questions": _LIST_STRING_SCHEMA,
+        "warnings": _LIST_STRING_SCHEMA,
+    },
+    "required": ["answer", "referenced_plan", "safety_notes", "follow_up_questions", "warnings"],
+    "additionalProperties": True,
+}
+
 SCHEDULE_SCHEMA: Dict[str, Any] = {
     "name": "journeyfit.schedule",
     "type": "object",
@@ -138,9 +194,9 @@ SPECIALIST_SCHEMAS: Dict[tuple[str, str], Dict[str, Any]] = {
     ("nutritionist", "domain_plan"): NUTRITION_SCHEMA,
     ("nutritionist", "revision"): NUTRITION_SCHEMA,
     ("personal_trainer", "domain_plan"): TRAINING_SCHEMA,
+    ("personal_trainer", "existing_plan_conversation"): TRAINING_CONVERSATION_SCHEMA,
     ("personal_trainer", "revision"): TRAINING_SCHEMA,
     ("scheduler", "schedule"): SCHEDULE_SCHEMA,
     ("reviewer", "review"): REVIEWER_SCHEMA,
     ("synthesizer", "synthesis"): SYNTHESIZER_SCHEMA,
 }
-

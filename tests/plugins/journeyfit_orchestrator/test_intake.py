@@ -44,3 +44,12 @@ def test_full_weekly_routine_requires_schedule():
     assert assessment.requires_nutrition is True
     assert assessment.requires_training is True
     assert assessment.requires_scheduler is True
+
+
+def test_training_frequency_does_not_become_schedule_only():
+    context = OrchestrationContext(user_message="tenho 28 anos. 78kg e quero treinar 3x por semana", user_profile={})
+    assessment = IntakeAnalyzer().assess(context)
+    assert assessment.goal_type == "training_plan"
+    assert assessment.requested_domains == ["training"]
+    assert assessment.requires_training is True
+    assert assessment.requires_scheduler is False

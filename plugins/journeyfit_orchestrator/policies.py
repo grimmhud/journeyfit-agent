@@ -104,7 +104,7 @@ def infer_goal_type(message: str) -> str:
         ("meal_planning", ["dieta", "aliment", "cardapio", "refeicao", "cafe da manha", "jantar", "almoco", "lanche"]),
         (
             "training_plan",
-            ["treino", "musculacao", "exercicio", "workout", "plano", "plano de treino", "upper/lower", "academia"],
+            ["treino", "treinar", "musculacao", "exercicio", "workout", "plano", "plano de treino", "upper/lower", "academia"],
         ),
         ("routine_planning", ["rotina", "semana", "agenda", "dias por semana", "horarios"]),
         ("weight_loss", ["emagrec", "perder peso", "perder gordura", "secar", "cutting"]),
@@ -125,9 +125,10 @@ def infer_requested_domains(message: str) -> list[str]:
     domains = []
     if any(tok in text for tok in ["dieta", "aliment", "cardapio", "refeicao", "proteina", "caloria"]):
         domains.append("nutrition")
-    if any(tok in text for tok in ["treino", "muscul", "exercicio", "corr", "corrida", "bike", "academia"]):
+    if any(tok in text for tok in ["treino", "treinar", "muscul", "exercicio", "corr", "corrida", "bike", "academia"]):
         domains.append("training")
-    if any(tok in text for tok in ["rotina", "semana", "agenda", "horario", "disponibilidade"]):
+    frequency_only = bool(re.search(r"\b\d+\s*(?:x|vezes|dias?)\s*(?:por semana|na semana|/semana)\b", text))
+    if any(tok in text for tok in ["rotina", "agenda", "horario", "disponibilidade"]) or ("semana" in text and not frequency_only):
         domains.append("schedule")
     if contains_any(risk_text, MEDICAL_INTAKE_TERMS) or any(tok in risk_text for tok in ["seguro", "medicamente", "clinicamente"]):
         domains.append("medical")

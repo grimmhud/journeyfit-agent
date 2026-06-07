@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from plugins.journeyfit_orchestrator.context import OrchestrationContext
 from plugins.journeyfit_orchestrator.planner import IntakeAnalyzer, TaskPlanner
 from plugins.journeyfit_orchestrator.specialists import SpecialistRunner
+from plugins.journeyfit_orchestrator.task_graph import AgentTask
 
 
 class _FakeLLM:
@@ -99,3 +100,53 @@ def test_runner_falls_back_to_structured_llm_without_parent_agent():
     task = next(task for task in TaskPlanner().plan(context) if task.id == "nutrition_plan")
     result = SpecialistRunner(ctx).run(task, context)
     assert result["summary"] == "Nutrição pronta."
+def test_existing_training_conversation_delegate_uses_leaf_toolset_without_plan_injection():
+    calls = []
+
+    def _fake_delegate_task(**kwargs):
+        calls.append(kwargs)
+        return json.dumps(
+            {
+                "results": [
+                    {
+                        "status": "completed",
+                        "exit_reason": "completed",
+                        "summary": json.dumps(
+                            {
+                                "answer": "Vi o treino salvo pela tool e ajustaria o treino de perna.",
+                                "referenced_plan": {"source": "journeyfit_current_plan"},
+                                "safety_notes": [],
+                                "follow_up_questions": [],
+                                "warnings": [],
+                            }
+                        ),
+                        "tool_trace": [{"tool": "journeyfit_current_plan"}],
+                    }
+                ]
+            }
+        )
+
+    parent_agent = SimpleNamespace(session_id="parent-1")
+    ctx = SimpleNamespace(llm=_FakeLLM())
+    context = OrchestrationContext(
+        user_message="estou tendo dificuldade no treino de perna",
+        user_profile={},
+    )
+    context.intake = {"requires_training": False}
+    context.shared["session_id"] = "api-chat-ola"
+    context.shared["plan_status"] = {"has_training_plan": True}
+    task = AgentTask(
+        id="existing_training_conversation",
+        agent="personal_trainer",
+        task_type="existing_plan_conversation",
+        objective="Responder sobre o treino salvo.",
+        expected_output="Resposta sobre treino salvo.",
+    )
+
+    result = SpecialistRunner(ctx, parent_agent=parent_agent, delegate_fn=_fake_delegate_task).run(task, context)
+
+    assert result["answer"].startswith("Vi o treino salvo")
+    assert calls[0]["toolsets"] == ["__journeyfit_leaf__"]
+    assert "journeyfit_current_plan" in calls[0]["goal"]
+    assert '"session_id": "api-chat-ola"' in calls[0]["context"]
+    assert "current_plan" not in calls[0]["context"]

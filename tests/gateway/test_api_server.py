@@ -3109,6 +3109,37 @@ class TestSessionIdHeader:
             assert call_kwargs["user_message"] == "new question"
 
     @pytest.mark.asyncio
+    async def test_loopback_session_id_without_api_key_loads_history_from_db(self):
+        """Local JourneyFit web clients can use state.db continuity without sending full history."""
+        adapter = _make_adapter(cors_origins=["http://127.0.0.1:57238"])
+        mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}
+        db_history = [
+            {"role": "user", "content": "stored question"},
+            {"role": "assistant", "content": "stored answer"},
+        ]
+        mock_db = MagicMock()
+        mock_db.get_messages_as_conversation.return_value = db_history
+        adapter._session_db = mock_db
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (mock_result, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0})
+
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    headers={
+                        "X-Hermes-Session-Id": "journeyfit-session-123",
+                        "Origin": "http://127.0.0.1:57238",
+                    },
+                    json={"model": "hermes-agent", "messages": [{"role": "user", "content": "continue"}]},
+                )
+
+            assert resp.status == 200
+            call_kwargs = mock_run.call_args.kwargs
+            assert call_kwargs["session_id"] == "journeyfit-session-123"
+            assert call_kwargs["conversation_history"] == db_history
+
+    @pytest.mark.asyncio
     async def test_db_failure_falls_back_to_empty_history(self, auth_adapter):
         """If SessionDB raises, history falls back to empty and request still succeeds."""
         mock_result = {"final_response": "OK", "messages": [], "api_calls": 1}

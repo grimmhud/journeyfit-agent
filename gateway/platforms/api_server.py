@@ -608,6 +608,24 @@ def _derive_chat_session_id(
     return f"api-{digest}"
 
 
+def _is_loopback_request(request: "web.Request") -> bool:
+    peer = request.transport.get_extra_info("peername") if request.transport else None
+    host = ""
+    if isinstance(peer, tuple) and peer:
+        host = str(peer[0])
+    elif peer:
+        host = str(peer)
+    if host in {"127.0.0.1", "::1", "localhost"}:
+        return True
+
+    forwarded = request.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
+    if forwarded in {"127.0.0.1", "::1", "localhost"}:
+        return True
+
+    origin = request.headers.get("Origin", "")
+    return origin.startswith(("http://127.0.0.1", "http://localhost", "http://[::1]"))
+
+
 _CRON_AVAILABLE = False
 try:
     from cron.jobs import (
@@ -1032,6 +1050,7 @@ class APIServerAdapter(BasePlatformAdapter):
                 "health_detailed": {"method": "GET", "path": "/health/detailed"},
                 "models": {"method": "GET", "path": "/v1/models"},
                 "chat_completions": {"method": "POST", "path": "/v1/chat/completions"},
+                "journeyfit_latest_workout_plan": {"method": "GET", "path": "/v1/journeyfit/workout-plans/latest"},
                 "responses": {"method": "POST", "path": "/v1/responses"},
                 "runs": {"method": "POST", "path": "/v1/runs"},
                 "run_status": {"method": "GET", "path": "/v1/runs/{run_id}"},
@@ -1040,6 +1059,47 @@ class APIServerAdapter(BasePlatformAdapter):
                 "run_stop": {"method": "POST", "path": "/v1/runs/{run_id}/stop"},
             },
         })
+
+    async def _handle_journeyfit_latest_workout_plan(self, request: "web.Request") -> "web.Response":
+        """GET /v1/journeyfit/workout-plans/latest — latest saved JourneyFit workout plan."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            from plugins.journeyfit_orchestrator.storage import get_latest_workout_plan
+
+            record = get_latest_workout_plan(
+                user_id=(request.query.get("user_id") or "").strip() or None,
+                session_id=(request.query.get("session_id") or "").strip() or None,
+            )
+        except Exception:
+            logger.warning("Failed to load latest JourneyFit workout plan", exc_info=True)
+            return web.json_response(
+                {"error": {"message": "Failed to load latest JourneyFit workout plan", "type": "server_error"}},
+                status=500,
+            )
+
+        if record is None:
+            return web.json_response(
+                {"error": {"message": "No JourneyFit workout plan saved yet", "type": "not_found"}},
+                status=404,
+            )
+
+        plan = record["plan"]
+        if isinstance(plan, dict):
+            plan.setdefault("workout_plan_id", record["id"])
+            plan.setdefault("plan_version", record["version"])
+        return web.json_response(
+            {
+                "workout_plan_id": record["id"],
+                "plan_version": record["version"],
+                "source_message": record["source_message"],
+                "created_at": record["created_at"],
+                "updated_at": record["updated_at"],
+                "plan": plan,
+            }
+        )
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
@@ -1126,23 +1186,23 @@ class APIServerAdapter(BasePlatformAdapter):
         # Allow caller to continue an existing session by passing X-Hermes-Session-Id.
         # When provided, history is loaded from state.db instead of from the request body.
         #
-        # Security: session continuation exposes conversation history, so it is
-        # only allowed when the API key is configured and the request is
-        # authenticated.  Without this gate, any unauthenticated client could
-        # read arbitrary session history by guessing/enumerating session IDs.
+        # Security: session continuation exposes conversation history.  In
+        # production it requires API-key auth; for local JourneyFit web
+        # development, allow loopback clients when the API server itself is
+        # intentionally running without a key.
         provided_session_id = request.headers.get("X-Hermes-Session-Id", "").strip()
         if provided_session_id:
-            if not self._api_key:
+            if not self._api_key and not _is_loopback_request(request):
                 logger.warning(
                     "%s session continuation via X-Hermes-Session-Id rejected: "
-                    "no API key configured.  Set API_SERVER_KEY to enable "
-                    "session continuity.",
+                    "no API key configured and request is not loopback.  Set "
+                    "API_SERVER_KEY to enable session continuity.",
                     log_prefix,
                 )
                 return web.json_response(
                     _openai_error(
                         "Session continuation requires API key authentication. "
-                        "Configure API_SERVER_KEY to enable this feature."
+                        "Configure API_SERVER_KEY or call from loopback in local development."
                     ),
                     status=403,
                 )
@@ -3512,6 +3572,7 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/health", self._handle_health)
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
+            self._app.router.add_get("/v1/journeyfit/workout-plans/latest", self._handle_journeyfit_latest_workout_plan)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)

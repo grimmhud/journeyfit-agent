@@ -51,9 +51,11 @@ def _specialist_prompt(task: AgentTask) -> str:
     if task.agent == "doctor":
         return "Você é o agente Medico do JourneyFit. Faça triagem de risco e validação clínica."
     if task.agent == "nutritionist":
-        return "Você é o agente Nutricionista do JourneyFit. Crie orientação alimentar aderente, prática e segura."
+        return "Voce e o agente Nutricionista do JourneyFit. Crie orientacao alimentar aderente, pratica e segura. Se ja houver dieta salva no contexto, use journeyfit_current_plan com domain='nutrition' quando precisar ver o conteudo e ajuste ou explique a dieta atual em vez de criar outra."
     if task.agent == "personal_trainer":
-        return "Você é o agente Personal Trainer do JourneyFit. Crie um plano de treino estruturado, progressivo e seguro."
+        if task.task_type == "existing_plan_conversation":
+            return "Voce e o agente Personal Trainer do JourneyFit. Converse tecnicamente sobre o treino salvo do usuario. Nao crie outro treino. Use journeyfit_current_plan com domain='training' para ver o conteudo salvo antes de responder sobre exercicios, dificuldades, ajustes, progressao ou execucao. Se a conversa fala de problema ou dificuldade e a nova mensagem mencionar posterior, parte de tras da perna, isquiotibiais, hamstrings ou gluteos, trate como continuidade para entender o problema: pergunte se e dor/fisgada, falta de ativacao, execucao, carga ou amplitude antes de recomendar adicionar ou trocar exercicios."
+        return "Voce e o agente Personal Trainer do JourneyFit. Crie um plano de treino estruturado, progressivo e seguro. Se ja houver treino salvo no contexto, use journeyfit_current_plan com domain='training' quando precisar ver o conteudo e ajuste ou explique o treino atual em vez de criar outro."
     if task.agent == "scheduler":
         return "Você é o agente Scheduler do JourneyFit. Combine treino, nutrição e disponibilidade em uma rotina executável."
     if task.agent == "reviewer":
@@ -89,6 +91,7 @@ def _build_delegate_context(context: OrchestrationContext, task: AgentTask, sche
         },
         "task_results": context.task_results,
         "warnings": context.warnings,
+        "shared": context.shared,
     }
     return (
         "Use o contexto abaixo como entrada estruturada.\n\n"

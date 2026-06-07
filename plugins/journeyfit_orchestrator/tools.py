@@ -13,6 +13,8 @@ from plugins.journeyfit_orchestrator.executor import TaskExecutor
 from plugins.journeyfit_orchestrator.planner import IntakeAnalyzer, TaskPlanner
 from plugins.journeyfit_orchestrator.policies import normalize_text
 from plugins.journeyfit_orchestrator.specialists import SpecialistRunner
+from plugins.journeyfit_orchestrator.task_graph import AgentTask
+from plugins.journeyfit_orchestrator.storage import get_current_plan, get_plan_status, save_workout_plan
 from tools.registry import tool_error
 
 
@@ -20,6 +22,64 @@ logger = logging.getLogger(__name__)
 
 _RECENT_TOOL_RESULTS: dict[str, tuple[float, str]] = {}
 _TOOL_RESULT_TTL_SECONDS = 300
+
+
+def _profile_user_id(profile: dict[str, Any]) -> str | None:
+    for key in ("user_id", "id", "profile_id"):
+        value = profile.get(key)
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
+def _resolve_plan_lookup(args: dict[str, Any], kwargs: dict[str, Any]) -> tuple[str | None, str | None]:
+    profile = args.get("user_profile") if isinstance(args.get("user_profile"), dict) else {}
+    user_id = str(args.get("user_id") or "").strip() or _profile_user_id(profile)
+    session_id = str(args.get("session_id") or kwargs.get("session_id") or "").strip()
+    return user_id or None, session_id or None
+
+
+def run_journeyfit_plan_status(args: dict[str, Any], **kwargs: Any) -> str:
+    try:
+        user_id, session_id = _resolve_plan_lookup(args, kwargs)
+        status = get_plan_status(user_id=user_id, session_id=session_id)
+        status["success"] = True
+        status["lookup"] = {"user_id": user_id, "session_id": session_id}
+        return json.dumps(status, ensure_ascii=False)
+    except Exception as exc:
+        logger.exception("journeyfit_plan_status failed")
+        return tool_error(f"journeyfit_plan_status failed: {exc}")
+
+
+def run_journeyfit_current_plan(args: dict[str, Any], **kwargs: Any) -> str:
+    try:
+        user_id, session_id = _resolve_plan_lookup(args, kwargs)
+        domain = str(args.get("domain") or "both").strip().lower()
+        plan = get_current_plan(domain=domain, user_id=user_id, session_id=session_id)
+        if plan is None:
+            return json.dumps(
+                {
+                    "success": True,
+                    "found": False,
+                    "domain": domain,
+                    "plan": None,
+                    "lookup": {"user_id": user_id, "session_id": session_id},
+                },
+                ensure_ascii=False,
+            )
+        return json.dumps(
+            {
+                "success": True,
+                "found": True,
+                "domain": domain,
+                "plan": plan,
+                "lookup": {"user_id": user_id, "session_id": session_id},
+            },
+            ensure_ascii=False,
+        )
+    except Exception as exc:
+        logger.exception("journeyfit_current_plan failed")
+        return tool_error(f"journeyfit_current_plan failed: {exc}")
 
 
 def _default_training() -> dict[str, Any]:
@@ -486,6 +546,571 @@ def _envelope(payload: dict[str, Any], *, questions: list[str] | None = None) ->
     return payload
 
 
+def _load_plan_status_for_context(context: OrchestrationContext, kwargs: dict[str, Any]) -> dict[str, Any]:
+    user_id = _profile_user_id(context.user_profile)
+    session_id = str(kwargs.get("session_id") or context.shared.get("session_id") or "").strip() or None
+    status = get_plan_status(user_id=user_id, session_id=session_id)
+    context.shared["plan_status"] = status
+    context.trace.append(
+        {
+            "event": "plan_status_checked",
+            "has_training_plan": status.get("has_training_plan"),
+            "has_nutrition_plan": status.get("has_nutrition_plan"),
+            "latest_plan_id": (status.get("latest_plan") or {}).get("id") if isinstance(status.get("latest_plan"), dict) else None,
+        }
+    )
+    return status
+
+
+def _existing_requested_domains(assessment, plan_status: dict[str, Any]) -> list[str]:
+    domains: list[str] = []
+    if assessment.requires_training and plan_status.get("has_training_plan"):
+        domains.append("training")
+    if assessment.requires_nutrition and plan_status.get("has_nutrition_plan"):
+        domains.append("nutrition")
+    return domains
+
+
+def _history_mentions_training_context(context: OrchestrationContext) -> bool:
+    normalized = normalize_text(_history_text(context))
+    return any(
+        marker in normalized
+        for marker in (
+            "treino",
+            "exercicio",
+            "exercício",
+            "perna",
+            "inferior",
+            "agachamento",
+            "leg press",
+            "posterior",
+            "parte de tras da perna",
+            "parte de trás da perna",
+        )
+    )
+
+
+def _apply_saved_plan_continuity_from_history(
+    assessment,
+    context: OrchestrationContext,
+    plan_status: dict[str, Any],
+) -> None:
+    if not plan_status.get("has_training_plan"):
+        return
+    if assessment.requires_training or assessment.requires_medical_intake:
+        return
+    if not (_mentions_posterior_chain(context.user_message) or _history_mentions_training_context(context)):
+        return
+    assessment.requires_training = True
+    if "training" not in assessment.requested_domains:
+        assessment.requested_domains.append("training")
+    if assessment.goal_type == "unknown":
+        assessment.goal_type = "training_plan"
+    context.trace.append(
+        {
+            "event": "saved_training_continuity_from_history",
+            "reason": "short_followup_with_training_history",
+        }
+    )
+
+
+def _apply_existing_plan_guardrails(assessment, existing_domains: list[str]) -> None:
+    if "training" in existing_domains:
+        assessment.requires_training = False
+    if "nutrition" in existing_domains:
+        assessment.requires_nutrition = False
+    if not (assessment.requires_training and assessment.requires_nutrition):
+        assessment.requires_scheduler = False
+    assessment.can_answer_lightweight = (
+        not assessment.requires_medical_intake
+        and not assessment.requires_scheduler
+        and (assessment.requires_nutrition ^ assessment.requires_training or (not assessment.requires_nutrition and not assessment.requires_training))
+    )
+
+
+def _format_exercise_names(session: dict[str, Any], *, limit: int = 4) -> str:
+    exercises = session.get("exercises")
+    if not isinstance(exercises, list):
+        return ""
+    names: list[str] = []
+    for item in exercises:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if name:
+            names.append(name)
+        if len(names) >= limit:
+            break
+    return ", ".join(names)
+
+
+def _requested_training_session_marker(user_message: str) -> str | None:
+    normalized = normalize_text(user_message or "")
+    markers = [
+        ("a", ["treino a", "dia a", "day 1", "dia 1", "day-1"]),
+        ("b", ["treino b", "dia b", "day 2", "dia 2", "day-2"]),
+        ("c", ["treino c", "dia c", "day 3", "dia 3", "day-3"]),
+        ("d", ["treino d", "dia d", "day 4", "dia 4", "day-4"]),
+    ]
+    for marker, aliases in markers:
+        if any(alias in normalized for alias in aliases):
+            return marker
+    return None
+
+
+def _session_matches_marker(session: dict[str, Any], marker: str) -> bool:
+    text = normalize_text(
+        " ".join(
+            str(session.get(key) or "")
+            for key in ("id", "name", "title", "day")
+        )
+    )
+    return (
+        f"treino {marker}" in text
+        or f"dia {marker}" in text
+        or f"day-{ord(marker) - 96}" in text
+        or f"day {ord(marker) - 96}" in text
+        or f"dia {ord(marker) - 96}" in text
+    )
+
+
+def _training_plan_summary(plan: dict[str, Any] | None, *, user_message: str = "") -> str:
+    if not isinstance(plan, dict):
+        return ""
+    training = plan.get("training")
+    if not isinstance(training, dict):
+        return ""
+
+    parts: list[str] = []
+    frequency = training.get("weekly_frequency") or training.get("days_per_week")
+    if frequency:
+        parts.append(f"frequencia de {frequency}x por semana")
+    split = str(training.get("split") or "").strip()
+    if split:
+        parts.append(f"divisao {split}")
+
+    sessions = training.get("sessions")
+    session_lines: list[str] = []
+    if isinstance(sessions, list):
+        requested_marker = _requested_training_session_marker(user_message)
+        selected_sessions = sessions
+        if requested_marker:
+            selected_sessions = [
+                item for item in sessions
+                if isinstance(item, dict) and _session_matches_marker(item, requested_marker)
+            ] or sessions[:1]
+        for index, raw_session in enumerate(selected_sessions[:4], start=1):
+            if not isinstance(raw_session, dict):
+                continue
+            name = str(raw_session.get("name") or raw_session.get("title") or f"Treino {index}").strip()
+            exercise_names = _format_exercise_names(raw_session)
+            if exercise_names:
+                session_lines.append(f"{name}: {exercise_names}")
+            else:
+                session_lines.append(name)
+
+    summary = ""
+    if parts:
+        summary = " com " + " e ".join(parts)
+    if session_lines:
+        return f"Vejo seu treino salvo{summary}. Sessoes principais: " + "; ".join(session_lines) + "."
+    return f"Vejo seu treino salvo{summary}."
+
+
+def _existing_plan_message(
+    existing_domains: list[str],
+    plan_status: dict[str, Any],
+    *,
+    current_plan: dict[str, Any] | None = None,
+    user_message: str = "",
+) -> str:
+    if set(existing_domains) == {"training", "nutrition"}:
+        label = "treino e dieta salvos"
+        target = "neles"
+    elif "training" in existing_domains:
+        label = "treino salvo"
+        target = "nele"
+    else:
+        label = "dieta salva"
+        target = "nela"
+    latest = plan_status.get("latest_plan") if isinstance(plan_status.get("latest_plan"), dict) else {}
+    version = latest.get("version")
+    version_text = f" (versao {version})" if version else ""
+    plan_summary = _training_plan_summary(current_plan, user_message=user_message) if "training" in existing_domains else ""
+    if plan_summary:
+        return (
+            f"Sim, consigo ver. {plan_summary} "
+            f"Para manter a continuidade, nao vou criar outro plano agora; "
+            f"vamos trabalhar {target}. Me diga qual ajuste, duvida ou dificuldade voce quer resolver."
+        )
+    return (
+        f"Voce ja tem {label}{version_text}. Para manter a continuidade, nao vou criar outro plano agora; "
+        f"vamos trabalhar {target}. Me diga qual ajuste, duvida ou dificuldade voce quer resolver."
+    )
+
+
+def _existing_plan_payload(
+    context: OrchestrationContext,
+    *,
+    assessment,
+    existing_domains: list[str],
+    plan_status: dict[str, Any],
+) -> dict[str, Any]:
+    domain = "both" if set(existing_domains) == {"training", "nutrition"} else existing_domains[0]
+    current_plan = get_current_plan(
+        domain=domain,
+        user_id=_profile_user_id(context.user_profile),
+        session_id=str(context.shared.get("session_id") or "") or None,
+    )
+    assistant_message = _existing_plan_message(
+        existing_domains,
+        plan_status,
+        current_plan=current_plan,
+        user_message=context.user_message,
+    )
+    payload = {
+        "success": True,
+        "mode": "conversation",
+        "answer": "",
+        "assistant_message": assistant_message,
+        "user_facing_message": assistant_message,
+        "intake": assessment.__dict__,
+        "plan_status": plan_status,
+        "current_plan": current_plan,
+        "selected_agents": [],
+        "tasks": [],
+        "task_results": {},
+        "warnings": context.warnings,
+        "follow_up_questions": [],
+        "trace": context.trace,
+    }
+    _envelope(payload)
+    return payload
+
+
+def _should_delegate_existing_plan_conversation(user_message: str, existing_domains: list[str]) -> bool:
+    if "training" not in existing_domains:
+        return False
+    normalized = normalize_text(user_message or "")
+    duplicate_creation_markers = [
+        "montar outro treino",
+        "criar outro treino",
+        "fazer outro treino",
+        "novo treino",
+        "outro treino",
+        "gerar treino",
+        "montar treino",
+        "criar treino",
+    ]
+    if any(marker in normalized for marker in duplicate_creation_markers):
+        return False
+    simple_visibility_markers = [
+        "consegue ver",
+        "voce ve",
+        "voce consegue acessar",
+        "qual e meu treino",
+        "mostrar meu treino",
+        "ver meu treino",
+    ]
+    technical_markers = [
+        "dificuldade",
+        "dificultade",
+        "difÃ­cil",
+        "dificil",
+        "perna",
+        "treino a",
+        "treino b",
+        "treino c",
+        "exercicio",
+        "exercÃ­cio",
+        "execucao",
+        "execuÃ§Ã£o",
+        "ajust",
+        "substit",
+        "trocar",
+        "progress",
+        "carga",
+        "serie",
+        "sÃ©rie",
+        "repet",
+        "descanso",
+        "falha",
+        "cansaco",
+        "cansaÃ§o",
+    ]
+    if any(marker in normalized for marker in technical_markers):
+        return True
+    return not any(marker in normalized for marker in simple_visibility_markers)
+
+
+def _json_from_text(text: str) -> dict[str, Any] | None:
+    stripped = (text or "").strip()
+    candidates = [stripped]
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if len(lines) > 2:
+            body = "\n".join(lines[1:])
+            if body.endswith("```"):
+                body = body[:-3]
+            candidates.append(body.strip())
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+
+def _specialist_display_answer(result: dict[str, Any]) -> str:
+    for key in (
+        "answer",
+        "user_facing_message",
+        "assistant_message",
+        "agent_message",
+        "summary",
+        "response_text",
+        "response_message",
+        "request_for_information",
+        "message",
+    ):
+        value = result.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        parsed = _json_from_text(value)
+        if parsed is not None:
+            nested = _specialist_display_answer(parsed)
+            if nested:
+                return nested
+        return value.strip()
+    return ""
+
+
+_POSTERIOR_CHAIN_MARKERS = (
+    "parte de tras da perna",
+    "parte de trás da perna",
+    "posterior",
+    "posteriores",
+    "isquiotibiais",
+    "isquios",
+    "hamstring",
+    "hamstrings",
+    "biceps femoral",
+    "bíceps femoral",
+    "gluteo",
+    "glúteo",
+)
+
+
+def _mentions_posterior_chain(user_message: str) -> bool:
+    normalized = normalize_text(user_message or "")
+    return any(marker in normalized for marker in _POSTERIOR_CHAIN_MARKERS)
+
+
+def _answer_is_still_identifying_exercise(answer: str) -> bool:
+    normalized = normalize_text(answer or "")
+    return any(
+        marker in normalized
+        for marker in (
+            "qual desses",
+            "qual deles",
+            "voce se refere a um desses",
+            "você se refere a um desses",
+            "me diga qual deles",
+            "qual exercicio",
+            "qual exercício",
+        )
+    )
+
+
+def _history_mentions_training_problem(context: OrchestrationContext) -> bool:
+    normalized = normalize_text(_history_text(context))
+    return any(
+        marker in normalized
+        for marker in (
+            "nao esta muito legal",
+            "não está muito legal",
+            "esta ruim",
+            "está ruim",
+            "dificuldade",
+            "desconforto",
+            "incomoda",
+            "incomodando",
+            "problema",
+            "dor",
+            "fisgada",
+        )
+    )
+
+
+def _answer_recommends_plan_change(answer: str) -> bool:
+    normalized = normalize_text(answer or "")
+    return any(
+        marker in normalized
+        for marker in (
+            "gostaria de adicionar",
+            "adicionar um",
+            "incluir exercicios",
+            "incluir exercícios",
+            "poderiamos incluir",
+            "poderíamos incluir",
+            "stiff",
+            "mesa flexora",
+            "leg curl",
+            "otimas opcoes",
+            "ótimas opções",
+            "trocar por",
+            "substituir por",
+        )
+    )
+
+
+def _exercise_names_from_current_plan(current_plan: dict[str, Any] | None) -> list[str]:
+    if not isinstance(current_plan, dict):
+        return []
+    training = current_plan.get("training") if isinstance(current_plan.get("training"), dict) else current_plan
+    sessions = training.get("sessions") if isinstance(training, dict) else []
+    names: list[str] = []
+    if not isinstance(sessions, list):
+        return names
+    for session in sessions:
+        if not isinstance(session, dict):
+            continue
+        exercises = session.get("exercises") or []
+        if not isinstance(exercises, list):
+            continue
+        for exercise in exercises:
+            if not isinstance(exercise, dict):
+                continue
+            name = str(exercise.get("name") or exercise.get("exercise") or "").strip()
+            if name:
+                names.append(name)
+    return names
+
+
+def _posterior_chain_followup_answer(current_plan: dict[str, Any] | None) -> str:
+    names = _exercise_names_from_current_plan(current_plan)
+    plan_text = ""
+    if names:
+        plan_text = f"No treino salvo eu vejo: {', '.join(names[:6])}. "
+    return (
+        f"Entendi: voce esta falando de um exercicio para a parte de tras da perna, os posteriores. {plan_text}"
+        "Antes de eu sugerir qualquer mudanca no treino, preciso entender o problema: "
+        "ele esta causando dor ou fisgada, voce nao esta sentindo o posterior trabalhar, a execucao esta dificil, "
+        "ou a carga/amplitude esta ruim? Se tiver dor aguda, dor atras do joelho, irradiacao ou desconforto na lombar, "
+        "reduza a carga e nao insista ate me dizer onde e como acontece."
+    )
+
+
+def _existing_plan_specialist_payload(
+    ctx,
+    context: OrchestrationContext,
+    *,
+    parent_agent,
+    assessment,
+    existing_domains: list[str],
+    plan_status: dict[str, Any],
+) -> dict[str, Any]:
+    task = AgentTask(
+        id="existing_training_conversation",
+        agent="personal_trainer",
+        task_type="existing_plan_conversation",
+        objective=(
+            "Responder sobre dificuldade, ajuste ou duvida do usuario em cima do treino salvo. "
+            "O especialista deve buscar o treino com journeyfit_current_plan quando precisar do conteudo."
+        ),
+        expected_output="Resposta tecnica, segura e contextual sobre o treino salvo.",
+    )
+    context.selected_agents = ["personal_trainer"]
+    context.trace.append(
+        {
+            "event": "existing_plan_specialist_route",
+            "task_id": task.id,
+            "agent": task.agent,
+            "domains": existing_domains,
+        }
+    )
+    runner = SpecialistRunner(ctx, parent_agent=parent_agent)
+    result = runner.run(task, context)
+    context.task_results[task.id] = result if isinstance(result, dict) else {"result": result}
+    answer = ""
+    follow_up_questions: list[str] = []
+    warnings: list[str] = []
+    if isinstance(result, dict):
+        answer = _specialist_display_answer(result)
+        questions = result.get("follow_up_questions") or result.get("questions") or []
+        if isinstance(questions, list):
+            follow_up_questions = [str(item) for item in questions if str(item).strip()]
+        result_warnings = result.get("warnings") or result.get("safety_notes") or []
+        if isinstance(result_warnings, list):
+            warnings = [str(item) for item in result_warnings if str(item).strip()]
+    if not answer:
+        answer = _existing_plan_message(existing_domains, plan_status, user_message=context.user_message)
+    current_plan = get_current_plan(
+        domain="training",
+        user_id=_profile_user_id(context.user_profile),
+        session_id=str(context.shared.get("session_id") or "") or None,
+    )
+    if (
+        _mentions_posterior_chain(context.user_message)
+        and (
+            _answer_is_still_identifying_exercise(answer)
+            or (_history_mentions_training_problem(context) and _answer_recommends_plan_change(answer))
+        )
+    ):
+        answer = _posterior_chain_followup_answer(current_plan)
+
+    payload = {
+        "success": True,
+        "mode": "conversation",
+        "answer": answer,
+        "assistant_message": answer,
+        "user_facing_message": answer,
+        "intake": assessment.__dict__,
+        "plan_status": plan_status,
+        "current_plan": current_plan,
+        "selected_agents": context.selected_agents,
+        "tasks": [task.id],
+        "task_results": context.task_results,
+        "warnings": context.warnings + warnings,
+        "follow_up_questions": follow_up_questions,
+        "trace": context.trace,
+    }
+    _envelope(payload, questions=follow_up_questions)
+    return payload
+
+
+def _persist_renderable_plan(context: OrchestrationContext, payload: dict[str, Any]) -> None:
+    plan = payload.get("renderable_plan")
+    if payload.get("mode") != "plan_ready" or not isinstance(plan, dict):
+        return
+
+    trace_id = str(context.shared.get("trace_id") or "")
+    session_id = str(context.shared.get("session_id") or "")
+    if not trace_id or trace_id == "-":
+        return
+
+    try:
+        stored = save_workout_plan(
+            plan=plan,
+            source_message=context.user_message or "",
+            user_id=str(context.user_profile.get("user_id") or context.user_profile.get("id") or "") or None,
+            session_id=session_id or trace_id,
+            trace_id=trace_id,
+        )
+    except Exception:
+        logger.warning("JourneyFit failed to persist workout plan trace_id=%s", trace_id, exc_info=True)
+        return
+
+    payload["workout_plan_id"] = stored.plan_id
+    payload["plan_version"] = stored.version
+    plan["workout_plan_id"] = stored.plan_id
+    plan["plan_version"] = stored.version
+
+
 def remember_journeyfit_tool_result(
     *,
     tool_name: str,
@@ -593,6 +1218,15 @@ def _infer_profile_hints(context: OrchestrationContext) -> dict[str, Any]:
         if match:
             profile["weight_kg"] = float(match.group(1).replace(",", "."))
 
+    if "height_cm" not in profile or profile.get("height_cm") in (None, ""):
+        match = re.search(r"\b(1[.,]\d{2}|2[.,][0-3]\d?)\s*(?:m|metro|metros)\b", normalized)
+        if match:
+            profile["height_cm"] = int(round(float(match.group(1).replace(",", ".")) * 100))
+        else:
+            match = re.search(r"\b(1[4-9]\d|2[0-2]\d)\s*(?:cm|centimetros|centimetro)\b", normalized)
+            if match:
+                profile["height_cm"] = int(match.group(1))
+
     if "training_days_per_week" not in profile or profile.get("training_days_per_week") in (None, ""):
         match = re.search(r"\b(\d)\s*(?:x|vezes|dias?)\s*(?:por semana|na semana|/semana)?\b", normalized)
         if match:
@@ -615,6 +1249,7 @@ def _infer_profile_hints(context: OrchestrationContext) -> dict[str, Any]:
 def _question_for_field(field_name: str) -> str | None:
     mapping = {
         "age": "Qual a sua idade?",
+        "height_cm": "Qual a sua altura?",
         "weight_kg": "Qual o seu peso atual?",
         "training_days_per_week": "Quantos dias por semana voce consegue treinar?",
         "meal_schedule": "Como e sua rotina de refeicoes ao longo do dia?",
@@ -662,12 +1297,12 @@ def _route_question_fields(assessment) -> list[str]:
     if assessment.requires_medical_intake:
         return ["pain", "injuries", "conditions"]
     if assessment.requires_training and assessment.requires_nutrition:
-        return ["age", "weight_kg", "training_days_per_week"]
+        return ["age", "height_cm", "weight_kg", "training_days_per_week"]
     if assessment.requires_nutrition:
-        return ["age", "weight_kg", "meal_schedule"]
+        return ["age", "height_cm", "weight_kg", "meal_schedule"]
     if assessment.requires_training:
-        return ["age", "weight_kg", "training_days_per_week"]
-    return ["age", "weight_kg", "training_days_per_week"]
+        return ["age", "height_cm", "weight_kg", "training_days_per_week"]
+    return ["age", "height_cm", "weight_kg", "training_days_per_week"]
 
 
 def _missing_route_fields(profile: dict[str, Any], fields: list[str]) -> list[str]:
@@ -679,6 +1314,13 @@ def _missing_route_fields(profile: dict[str, Any], fields: list[str]) -> list[st
     return missing
 
 
+def _blocking_missing_route_fields(missing_fields: list[str]) -> list[str]:
+    # Height improves BMI/risk estimates, but it should not be the only thing
+    # preventing a conservative starter workout when age, weight, and frequency
+    # are already available.
+    return [field for field in missing_fields if field != "height_cm"]
+
+
 def run_journeyfit_orchestration(ctx, args: dict, **kwargs) -> str:
     try:
         started_at = time.monotonic()
@@ -686,6 +1328,7 @@ def run_journeyfit_orchestration(ctx, args: dict, **kwargs) -> str:
         trace_id = str(kwargs.get("task_id") or kwargs.get("request_id") or kwargs.get("session_id") or "-")
         context = _build_context(args)
         context.shared["trace_id"] = trace_id
+        context.shared["session_id"] = str(kwargs.get("session_id") or "")
         context.trace.append(
             {
                 "event": "tool_invoked",
@@ -723,6 +1366,11 @@ def run_journeyfit_orchestration(ctx, args: dict, **kwargs) -> str:
         context.user_profile = _infer_profile_hints(context)
         intake_started_at = time.monotonic()
         assessment = IntakeAnalyzer().assess(context)
+        plan_status = _load_plan_status_for_context(context, kwargs)
+        _apply_saved_plan_continuity_from_history(assessment, context, plan_status)
+        existing_domains = _existing_requested_domains(assessment, plan_status)
+        if existing_domains:
+            _apply_existing_plan_guardrails(assessment, existing_domains)
         logger.info(
             "journeyfit_orchestrate intake done trace_id=%s elapsed_ms=%d goal_type=%s medical=%s nutrition=%s training=%s scheduler=%s lightweight=%s",
             trace_id,
@@ -736,11 +1384,52 @@ def run_journeyfit_orchestration(ctx, args: dict, **kwargs) -> str:
         )
         context.intake = assessment.__dict__
 
+        if (
+            existing_domains
+            and not assessment.requires_training
+            and not assessment.requires_nutrition
+            and not assessment.requires_medical_intake
+            and _should_delegate_existing_plan_conversation(context.user_message, existing_domains)
+        ):
+            payload = _existing_plan_specialist_payload(
+                ctx,
+                context,
+                parent_agent=parent_agent,
+                assessment=assessment,
+                existing_domains=existing_domains,
+                plan_status=plan_status,
+            )
+            logger.info(
+                "journeyfit_orchestrate existing_plan_specialist trace_id=%s domains=%s tasks=%s elapsed_ms=%d",
+                trace_id,
+                ",".join(existing_domains),
+                ",".join(payload.get("tasks") or []),
+                round((time.monotonic() - started_at) * 1000),
+            )
+            return json.dumps(payload, ensure_ascii=False)
+
+        if existing_domains and not assessment.requires_training and not assessment.requires_nutrition and not assessment.requires_medical_intake:
+            payload = _existing_plan_payload(
+                context,
+                assessment=assessment,
+                existing_domains=existing_domains,
+                plan_status=plan_status,
+            )
+            logger.info(
+                "journeyfit_orchestrate existing_plan_guard trace_id=%s domains=%s latest_plan=%s elapsed_ms=%d",
+                trace_id,
+                ",".join(existing_domains),
+                (plan_status.get("latest_plan") or {}).get("id") if isinstance(plan_status.get("latest_plan"), dict) else "-",
+                round((time.monotonic() - started_at) * 1000),
+            )
+            return json.dumps(payload, ensure_ascii=False)
+
         route_fields = _route_question_fields(assessment)
         missing_route_fields = _missing_route_fields(context.user_profile, route_fields)
-        if not assessment.requires_medical_intake and missing_route_fields and not _user_prefers_assumptions(context.user_message or ""):
+        blocking_missing_fields = _blocking_missing_route_fields(missing_route_fields)
+        if not assessment.requires_medical_intake and blocking_missing_fields and not _user_prefers_assumptions(context.user_message or ""):
             follow_up_questions: list[str] = []
-            for field_name in missing_route_fields[:3]:
+            for field_name in missing_route_fields[:4]:
                 question = _question_for_field(field_name)
                 if question and question not in follow_up_questions:
                     follow_up_questions.append(question)
@@ -823,6 +1512,7 @@ def run_journeyfit_orchestration(ctx, args: dict, **kwargs) -> str:
             assistant_message=assistant_message,
             questions=follow_up_questions,
         )
+        _persist_renderable_plan(context, payload)
         logger.info(
             "journeyfit_orchestrate done trace_id=%s profile=%s tasks=%d follow_up_questions=%d trace=%d elapsed_ms=%d",
             trace_id,
