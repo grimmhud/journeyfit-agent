@@ -18,6 +18,9 @@ Prefer existing local skills for narrow work:
 - `journeyfit-business-rules` for routing and safety defaults.
 - `journeyfit-status-envelope` for response shape and plan readiness.
 
+The sibling Flutter app has its own Codex skills under
+`../journeyfit-app/.codex/skills/`. Use those when editing app code.
+
 ## Project Map
 
 | Area | Files |
@@ -39,7 +42,7 @@ Prefer existing local skills for narrow work:
 - Do not ask intake questions before the orchestrator tool has analyzed the raw
   user message.
 - For normal users, return the tool's `user_facing_message` as the human reply.
-- For frontend/backend/developer JSON requests, return raw JSON only.
+- For app/backend/developer JSON requests, return raw JSON only.
 - Keep safety conservative around pain, injury, medical conditions, medication,
   and missing profile data.
 - Keep simple training requests on the small path: doctor only for medical risk,
@@ -59,6 +62,13 @@ JourneyFit agent responses may use a status envelope:
 When changing this shape, update the plugin tests and the app parser together.
 The Flutter app can adapt a `training` envelope, but the backend should still
 prefer stable, explicit JSON.
+
+Cross-repo app contract files live in `../journeyfit-app`:
+
+- `lib/data/datasources/chat_remote_datasource.dart`
+- `lib/data/datasources/plan_remote_datasource.dart`
+- `test/unit/chat_remote_datasource_test.dart`
+- `test/unit/plan_remote_datasource_test.dart`
 
 ## Profile And Runtime
 
@@ -124,7 +134,7 @@ curl -sS http://127.0.0.1:8642/v1/chat/completions \
 ## Pitfalls
 
 - Changing prompts without updating tests can hide broken routing.
-- Returning conversational text around JSON breaks frontend parsing.
+- Returning conversational text around JSON breaks app parsing.
 - Assuming `kg` only misses Portuguese inputs like `quilos`.
 - Editing `.hermes/profiles/orchestrator/.env` may be local-only if ignored.
 - A gateway restart can fail if another gateway is already active.
@@ -134,5 +144,5 @@ curl -sS http://127.0.0.1:8642/v1/chat/completions \
 - Focused plugin tests pass for changed JourneyFit behavior.
 - Logs show the expected `journeyfit_orchestrate` path.
 - Direct API calls return HTTP `200` and valid JSON shape.
-- If the change affects the app, verify browser chat through
-  `journeyfit-app` as well.
+- If the change affects the app, verify the sibling Flutter app in
+  `../journeyfit-app` as well.
