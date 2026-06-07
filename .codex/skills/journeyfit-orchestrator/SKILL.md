@@ -22,6 +22,7 @@ it from the orchestrator profile.
 
 The current contract is:
 - intake and routing happen in the plugin
+- saved plan status is checked before creating another workout or diet
 - specialists run as real delegated subagents when a parent agent exists
 - the simple path stays conservative and keeps the number of moving parts low
 
@@ -41,6 +42,8 @@ signals.
 | Concern | Edit here |
 |---|---|
 | Tool entrypoint | `plugins/journeyfit_orchestrator/tools.py` |
+| Tool schemas | `plugins/journeyfit_orchestrator/schemas.py` |
+| Plan persistence/status | `plugins/journeyfit_orchestrator/storage.py` |
 | Planner/routing | `plugins/journeyfit_orchestrator/planner.py` |
 | Safety heuristics | `plugins/journeyfit_orchestrator/policies.py` |
 | Task graph | `plugins/journeyfit_orchestrator/task_graph.py` |
@@ -57,9 +60,13 @@ signals.
 2. Edit the file that owns that layer instead of changing everything at once.
 3. Keep the simple path small: doctor only for medical risk, nutritionist for
    diet, personal_trainer for training, synthesizer for the final answer.
-4. If you add a new specialist or step, update the planner, schemas, tests, and
+4. Keep continuity after plan creation: use `journeyfit_plan_status` or the
+   orchestrator's internal status guard before creating a new workout or diet.
+   Keep this abstract; specialists use `journeyfit_current_plan` if they need
+   the saved workout or diet contents.
+5. If you add a new specialist or step, update the planner, schemas, tests, and
    the profile wiring together.
-5. Verify through logs and the JourneyFit plugin tests before widening the fix.
+6. Verify through logs and the JourneyFit plugin tests before widening the fix.
 
 ## Common Pitfalls
 
@@ -69,10 +76,12 @@ signals.
 3. Changing routing in the planner but leaving the profile prompt stale.
 4. Adding reviewer/scheduler to the simple path when the goal is stability.
 5. Forgetting that a failed specialist can still cascade into a dead task graph.
+6. Creating a second workout or diet when the user already has one saved.
 
 ## Verification
 
 - Check the orchestrator log for `journeyfit_orchestrate start` and `done`.
 - Look for `delegate_task_invoked` and `delegate_task_completed` in the trace.
 - Confirm the selected agents match the user request.
+- Confirm saved workout/diet requests do not spawn duplicate specialist plans.
 - Run the JourneyFit plugin tests after any routing or schema change.

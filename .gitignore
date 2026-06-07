@@ -45,6 +45,7 @@ hermes_agent.egg-info/
 wandb/
 testlogs
 app.log
+test-results/
 
 # Project-scoped Hermes home. Keep durable project knowledge in git while
 # excluding secrets, machine-local config, logs, databases, locks, and caches.

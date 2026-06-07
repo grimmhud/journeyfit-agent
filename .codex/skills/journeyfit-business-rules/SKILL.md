@@ -40,6 +40,8 @@ current routing defaults.
 |---|---|
 | Training request | `personal_trainer` |
 | Nutrition request | `nutritionist` |
+| Existing training plan | keep focus on the saved plan; do not create another |
+| Existing nutrition plan | keep focus on the saved diet; do not create another |
 | Pain, injury, condition, medication, red flags | `doctor` first |
 | Training + nutrition | both specialists |
 | Sparse profile | conservative starter plan + questions |
@@ -53,7 +55,9 @@ current routing defaults.
    limitations are missing.
 4. Use the existing specialists first; add new roles only when there is a
    clear gap.
-5. Update the tests for any routing change so the plan and the logs stay aligned.
+5. If a saved workout or diet exists, keep the conversation on that plan and
+   route only missing domains or safety checks.
+6. Update the tests for any routing change so the plan and the logs stay aligned.
 
 ## Common Pitfalls
 
@@ -61,10 +65,13 @@ current routing defaults.
 2. Reintroducing reviewer/scheduler into the simple path without a strong need.
 3. Returning a polished answer while the profile is still missing critical data.
 4. Changing routing in one place but not in the task planner or prompts.
+5. Letting the assistant create multiple workouts or diets for the same user
+   instead of revising the existing saved plan.
 
 ## Verification
 
 - Confirm the `selected_agents` list matches the scenario.
+- Confirm existing workout/diet state suppresses duplicate plan creation.
 - Check that medical risk routes to `doctor` before training details.
 - Confirm follow-up questions are present when data is sparse.
 - Run the JourneyFit planner and plugin tests after changing a rule.

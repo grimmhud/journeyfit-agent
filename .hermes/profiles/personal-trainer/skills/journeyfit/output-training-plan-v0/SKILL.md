@@ -20,6 +20,22 @@ Apenas quando o Personal Trainer esta respondendo ao orquestrador com um **plano
 Nao use para:
 - Perguntas de intake de treino ainda sem plano gerado
 - Respostas conversacionais diretas ao usuario
+- Criar um segundo treino quando `shared.plan_status.has_training_plan` for true; nesse caso, ajuste ou explique o treino salvo.
+
+## Continuidade do treino salvo
+
+Se o contexto do orquestrador trouxer `shared.plan_status.has_training_plan: true`,
+o Personal Trainer deve trabalhar em cima do treino atual. Nao gere outro plano
+paralelo, nao reinicie a periodizacao e nao troque a divisao semanal inteira sem
+pedido explicito de substituicao.
+
+Quando precisar ver o conteudo do treino salvo, chame `journeyfit_current_plan`
+com `domain: "training"`. O orquestrador deve passar apenas status abstrato,
+nao o treino inteiro.
+
+Use o v0 apenas quando a resposta realmente for uma revisao renderizavel do
+treino salvo. Para duvidas, explicacoes, pequenos ajustes ou check-ins, responda
+no schema interno sem criar novo `v0_output.training`.
 
 ## Campo obrigatorio: v0_output
 

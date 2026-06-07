@@ -20,6 +20,22 @@ Apenas quando o Nutricionista esta respondendo ao orquestrador com um **plano al
 Nao use para:
 - Perguntas de intake alimentar ainda sem plano gerado
 - Respostas conversacionais diretas ao usuario
+- Criar uma segunda dieta quando `shared.plan_status.has_nutrition_plan` for true; nesse caso, ajuste ou explique a dieta salva.
+
+## Continuidade da dieta salva
+
+Se o contexto do orquestrador trouxer `shared.plan_status.has_nutrition_plan: true`,
+o Nutricionista deve trabalhar em cima da dieta atual. Nao gere outro plano
+paralelo, nao reinicie metas e nao troque macros ou estrutura de refeicoes sem
+pedido explicito de substituicao.
+
+Quando precisar ver o conteudo da dieta salva, chame `journeyfit_current_plan`
+com `domain: "nutrition"`. O orquestrador deve passar apenas status abstrato,
+nao a dieta inteira.
+
+Use o v0 apenas quando a resposta realmente for uma revisao renderizavel da
+dieta salva. Para duvidas, substituicoes, pequenos ajustes ou check-ins,
+responda no schema interno sem criar novo `v0_output.nutrition`.
 
 ## Campo obrigatorio: v0_output
 
