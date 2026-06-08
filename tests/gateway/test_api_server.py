@@ -380,6 +380,9 @@ def _create_app(adapter: APIServerAdapter) -> web.Application:
     app.router.add_get("/v1/health", adapter._handle_health)
     app.router.add_get("/v1/models", adapter._handle_models)
     app.router.add_get("/v1/capabilities", adapter._handle_capabilities)
+    app.router.add_get("/v1/journeyfit/workout-plans/latest", adapter._handle_journeyfit_latest_workout_plan)
+    app.router.add_delete("/v1/journeyfit/workout-plans/latest", adapter._handle_delete_journeyfit_latest_workout_plan)
+    app.router.add_delete("/v1/journeyfit/workout-plans/{plan_id}", adapter._handle_delete_journeyfit_workout_plan)
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
     app.router.add_post("/v1/responses", adapter._handle_responses)
     app.router.add_get("/v1/responses/{response_id}", adapter._handle_get_response)
@@ -639,6 +642,57 @@ class TestCapabilitiesEndpoint:
             assert authed.status == 200
             data = await authed.json()
             assert data["auth"]["required"] is True
+
+
+# ---------------------------------------------------------------------------
+# JourneyFit workout plan endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestJourneyFitWorkoutPlanEndpoints:
+    @pytest.mark.asyncio
+    async def test_delete_workout_plan_deletes_selected_record(self, adapter):
+        app = _create_app(adapter)
+        with patch(
+            "plugins.journeyfit_orchestrator.storage.delete_workout_plan",
+            return_value=True,
+        ) as mock_delete:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.delete("/v1/journeyfit/workout-plans/wplan_123")
+                assert resp.status == 200
+                data = await resp.json()
+
+        assert data["deleted"] is True
+        assert data["workout_plan_id"] == "wplan_123"
+        mock_delete.assert_called_once_with("wplan_123")
+
+    @pytest.mark.asyncio
+    async def test_delete_latest_workout_plan_uses_latest_record(self, adapter):
+        app = _create_app(adapter)
+        record = {
+            "id": "wplan_456",
+            "version": 2,
+            "source_message": "latest",
+            "created_at": 1.0,
+            "updated_at": 2.0,
+            "plan": {},
+        }
+        with patch(
+            "plugins.journeyfit_orchestrator.storage.get_latest_workout_plan",
+            return_value=record,
+        ) as mock_latest, patch(
+            "plugins.journeyfit_orchestrator.storage.delete_workout_plan",
+            return_value=True,
+        ) as mock_delete:
+            async with TestClient(TestServer(app)) as cli:
+                resp = await cli.delete("/v1/journeyfit/workout-plans/latest")
+                assert resp.status == 200
+                data = await resp.json()
+
+        assert data["deleted"] is True
+        assert data["workout_plan_id"] == "wplan_456"
+        mock_latest.assert_called_once()
+        mock_delete.assert_called_once_with("wplan_456")
 
 
 # ---------------------------------------------------------------------------

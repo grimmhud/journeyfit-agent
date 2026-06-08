@@ -1051,6 +1051,8 @@ class APIServerAdapter(BasePlatformAdapter):
                 "models": {"method": "GET", "path": "/v1/models"},
                 "chat_completions": {"method": "POST", "path": "/v1/chat/completions"},
                 "journeyfit_latest_workout_plan": {"method": "GET", "path": "/v1/journeyfit/workout-plans/latest"},
+                "journeyfit_delete_workout_plan": {"method": "DELETE", "path": "/v1/journeyfit/workout-plans/{plan_id}"},
+                "journeyfit_delete_latest_workout_plan": {"method": "DELETE", "path": "/v1/journeyfit/workout-plans/latest"},
                 "responses": {"method": "POST", "path": "/v1/responses"},
                 "runs": {"method": "POST", "path": "/v1/runs"},
                 "run_status": {"method": "GET", "path": "/v1/runs/{run_id}"},
@@ -1100,6 +1102,72 @@ class APIServerAdapter(BasePlatformAdapter):
                 "plan": plan,
             }
         )
+
+    async def _handle_delete_journeyfit_workout_plan(self, request: "web.Request") -> "web.Response":
+        """DELETE /v1/journeyfit/workout-plans/{plan_id} — remove one saved JourneyFit workout plan."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        plan_id = (request.match_info.get("plan_id") or "").strip()
+        if not plan_id:
+            return web.json_response(
+                {"error": {"message": "plan_id is required", "type": "invalid_request_error"}},
+                status=400,
+            )
+
+        try:
+            from plugins.journeyfit_orchestrator.storage import delete_workout_plan
+
+            deleted = delete_workout_plan(plan_id)
+        except Exception:
+            logger.warning("Failed to delete JourneyFit workout plan %s", plan_id, exc_info=True)
+            return web.json_response(
+                {"error": {"message": "Failed to delete JourneyFit workout plan", "type": "server_error"}},
+                status=500,
+            )
+
+        if not deleted:
+            return web.json_response(
+                {"error": {"message": "JourneyFit workout plan not found", "type": "not_found"}},
+                status=404,
+            )
+
+        return web.json_response({"deleted": True, "workout_plan_id": plan_id})
+
+    async def _handle_delete_journeyfit_latest_workout_plan(self, request: "web.Request") -> "web.Response":
+        """DELETE /v1/journeyfit/workout-plans/latest — remove the most recent saved JourneyFit workout plan."""
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+
+        try:
+            from plugins.journeyfit_orchestrator.storage import delete_workout_plan, get_latest_workout_plan
+
+            record = get_latest_workout_plan(
+                user_id=(request.query.get("user_id") or "").strip() or None,
+                session_id=(request.query.get("session_id") or "").strip() or None,
+            )
+            if record is None:
+                return web.json_response(
+                    {"error": {"message": "No JourneyFit workout plan saved yet", "type": "not_found"}},
+                    status=404,
+                )
+            deleted = delete_workout_plan(str(record["id"]))
+        except Exception:
+            logger.warning("Failed to delete latest JourneyFit workout plan", exc_info=True)
+            return web.json_response(
+                {"error": {"message": "Failed to delete latest JourneyFit workout plan", "type": "server_error"}},
+                status=500,
+            )
+
+        if not deleted:
+            return web.json_response(
+                {"error": {"message": "JourneyFit workout plan not found", "type": "not_found"}},
+                status=404,
+            )
+
+        return web.json_response({"deleted": True, "workout_plan_id": record["id"]})
 
     async def _handle_chat_completions(self, request: "web.Request") -> "web.Response":
         """POST /v1/chat/completions — OpenAI Chat Completions format."""
@@ -3573,6 +3641,8 @@ class APIServerAdapter(BasePlatformAdapter):
             self._app.router.add_get("/v1/models", self._handle_models)
             self._app.router.add_get("/v1/capabilities", self._handle_capabilities)
             self._app.router.add_get("/v1/journeyfit/workout-plans/latest", self._handle_journeyfit_latest_workout_plan)
+            self._app.router.add_delete("/v1/journeyfit/workout-plans/latest", self._handle_delete_journeyfit_latest_workout_plan)
+            self._app.router.add_delete("/v1/journeyfit/workout-plans/{plan_id}", self._handle_delete_journeyfit_workout_plan)
             self._app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
             self._app.router.add_post("/v1/responses", self._handle_responses)
             self._app.router.add_get("/v1/responses/{response_id}", self._handle_get_response)

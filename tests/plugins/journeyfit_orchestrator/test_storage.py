@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from plugins.journeyfit_orchestrator.storage import (
+    delete_workout_plan,
     get_current_plan,
     get_latest_workout_plan,
     get_plan_status,
@@ -58,6 +59,17 @@ def test_get_latest_workout_plan_prefers_newest_record():
     assert latest["id"] == newer.plan_id
     assert latest["id"] != older.plan_id
     assert latest["source_message"] == "newer"
+
+
+def test_delete_workout_plan_removes_record():
+    stored = save_workout_plan(
+        plan={"status": "plan_ready", "mode": "plan_ready", "training": {"status": "provisional", "sessions": []}},
+        source_message="to-delete",
+        user_id="user-delete",
+    )
+
+    assert delete_workout_plan(stored.plan_id) is True
+    assert get_workout_plan(stored.plan_id) is None
 
 
 def test_get_plan_status_reports_training_and_nutrition_domains():

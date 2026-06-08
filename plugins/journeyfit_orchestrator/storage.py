@@ -136,6 +136,12 @@ def get_workout_plan(plan_id: str) -> dict[str, Any] | None:
     return record
 
 
+def delete_workout_plan(plan_id: str) -> bool:
+    with _connect() as conn:
+        cur = conn.execute("DELETE FROM workout_plans WHERE id = ?", (plan_id,))
+        return cur.rowcount > 0
+
+
 def get_latest_workout_plan(*, user_id: str | None = None, session_id: str | None = None) -> dict[str, Any] | None:
     where: list[str] = []
     params: list[Any] = []
