@@ -72,10 +72,11 @@ Cross-repo app contract files live in `../journeyfit-app`:
 
 ## Profile And Runtime
 
-Use the orchestrator profile for local JourneyFit API work:
+Use the orchestrator profile for local JourneyFit API work and for the Flutter
+web app talking to the local Hermes API:
 
 ```bash
-./.venv/bin/python ./hermes -p orchestrator gateway
+./hermes -p orchestrator gateway
 ```
 
 Important profile files:
@@ -88,8 +89,9 @@ Important profile files:
 ```
 
 For web app access, the API server must allow the web origin through CORS.
-Keep CORS configuration in profile env/config where possible instead of
-hardcoding app ports into Hermes core.
+The orchestrator profile already sets localhost and `5173` origins in
+`.hermes/profiles/orchestrator/.env`; keep CORS configuration in profile
+env/config where possible instead of hardcoding app ports into Hermes core.
 
 ## Commands
 

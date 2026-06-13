@@ -1155,6 +1155,15 @@ def passthrough_journeyfit_tool_result(
     except Exception:
         parsed_text = None
     if isinstance(parsed_text, dict):
+        status = str(parsed_text.get("status") or parsed_text.get("mode") or "").lower()
+        if status == "needs_more_info":
+            return (
+                parsed_text.get("user_facing_message")
+                or parsed_text.get("assistant_message")
+                or parsed_text.get("answer")
+                or parsed_text.get("final_response")
+                or text
+            )
         return None
     return json.dumps(
         {
@@ -1175,6 +1184,29 @@ def _build_context(args: dict[str, Any]) -> OrchestrationContext:
         conversation_history=args.get("conversation_history") or [],
         profile_name=str(args.get("profile_name") or args.get("profile") or "orchestrator"),
     )
+
+
+def _resolve_conversation_history(args: dict[str, Any], parent_agent: Any = None) -> tuple[list[dict[str, Any]], str]:
+    """Return the best available conversation history for the current turn.
+
+    The tool contract lets callers pass ``conversation_history`` explicitly, but
+    some agent paths only provide the current user message. In those cases we
+    fall back to the parent agent's last persisted session snapshot so the
+    orchestrator still sees the full chat context instead of restarting from
+    an empty history.
+    """
+    raw_history = args.get("conversation_history")
+    if isinstance(raw_history, list) and raw_history:
+        return list(raw_history), "args"
+
+    if parent_agent is not None:
+        session_messages = getattr(parent_agent, "_session_messages", None)
+        if isinstance(session_messages, list) and session_messages:
+            return list(session_messages), "parent_session"
+
+    if isinstance(raw_history, list):
+        return list(raw_history), "args"
+    return [], "empty"
 
 
 def _history_text(context: OrchestrationContext) -> str:
@@ -1326,7 +1358,8 @@ def run_journeyfit_orchestration(ctx, args: dict, **kwargs) -> str:
         started_at = time.monotonic()
         parent_agent = kwargs.get("parent_agent")
         trace_id = str(kwargs.get("task_id") or kwargs.get("request_id") or kwargs.get("session_id") or "-")
-        context = _build_context(args)
+        resolved_history, history_source = _resolve_conversation_history(args, parent_agent=parent_agent)
+        context = _build_context({**args, "conversation_history": resolved_history})
         context.shared["trace_id"] = trace_id
         context.shared["session_id"] = str(kwargs.get("session_id") or "")
         context.trace.append(
@@ -1339,11 +1372,12 @@ def run_journeyfit_orchestration(ctx, args: dict, **kwargs) -> str:
             }
         )
         logger.info(
-            "journeyfit_orchestrate start trace_id=%s profile=%s message_chars=%d history_messages=%d",
+            "journeyfit_orchestrate start trace_id=%s profile=%s message_chars=%d history_messages=%d history_source=%s",
             trace_id,
             context.profile_name,
             len(context.user_message or ""),
             len(context.conversation_history or []),
+            history_source,
         )
         if _conversation_mode(context):
             payload = {

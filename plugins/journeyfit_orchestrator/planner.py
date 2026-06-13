@@ -34,11 +34,11 @@ class IntakeAssessment:
 class IntakeAnalyzer:
     def assess(self, context: OrchestrationContext) -> IntakeAssessment:
         started_at = time.monotonic()
-        message = context.user_message or ""
         profile = context.user_profile or {}
-        goal_type = infer_goal_type(message)
-        requested_domains = infer_requested_domains(message)
-        risk_signals = infer_risk_signals(message, profile)
+        history_text = _conversation_text(context)
+        goal_type = infer_goal_type(history_text)
+        requested_domains = infer_requested_domains(history_text)
+        risk_signals = infer_risk_signals(history_text, profile)
         limitations: list[str] = []
 
         if goal_type == "rehab_or_pain" or "medical" in requested_domains:
@@ -83,6 +83,16 @@ class IntakeAnalyzer:
             }
         )
         return assessment
+
+
+def _conversation_text(context: OrchestrationContext) -> str:
+    parts = [context.user_message or ""]
+    for item in context.conversation_history or []:
+        if isinstance(item, dict):
+            parts.append(str(item.get("content") or ""))
+        else:
+            parts.append(str(item))
+    return "\n".join(part for part in parts if part)
 
 
 class TaskPlanner:

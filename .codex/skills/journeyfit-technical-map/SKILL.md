@@ -107,7 +107,7 @@ Hermes home resolution is centralized in `hermes_constants.py`:
 For JourneyFit API/gateway work, the usual local profile is:
 
 ```bash
-./.venv/bin/python ./hermes -p orchestrator gateway
+./hermes -p orchestrator gateway
 ```
 
 The profile-local DBs are usually:

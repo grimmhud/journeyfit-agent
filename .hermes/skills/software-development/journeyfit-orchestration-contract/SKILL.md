@@ -48,8 +48,10 @@ Rules:
 - `assistant_message` is always the human-facing response.
 - `mode` tells the frontend what kind of turn this is.
 - `missing_information` is for follow-up questions and intake gaps.
+- `follow_up_questions` can be surfaced when the orchestrator wants optional clarification without blocking the flow.
 - `renderable_plan` stays `null` until the orchestrator has enough context.
 - `debug` is for tracing and should not drive the user experience.
+- The orchestrator should not invent specialist advice in this envelope.
 
 ## Procedure
 

@@ -307,6 +307,59 @@ def test_orchestration_progresses_to_specialists_with_minimum_context():
     assert result["renderable_plan"]["nutrition"]["status"] == "unavailable"
 
 
+def test_orchestration_uses_parent_session_history_when_args_are_empty():
+    ctx = SimpleNamespace(llm=_FakeLLM())
+    parent_agent = SimpleNamespace(
+        _session_messages=[
+            {
+                "role": "user",
+                "content": "tenho 29 anos, peso 78kg, tenho 172cm e treino 5x por semana",
+            }
+        ]
+    )
+    result = json.loads(
+        run_journeyfit_orchestration(
+            ctx,
+            {
+                "user_message": "quero mais musculos",
+                "user_profile": {},
+            },
+            parent_agent=parent_agent,
+        )
+    )
+
+    assert result["success"] is True
+    assert result["mode"] == "plan_ready"
+    assert result["selected_agents"] == ["personal_trainer"]
+    assert result["follow_up_questions"] == []
+    assert result["renderable_plan"]["training"]["weekly_frequency"] == 5
+
+
+def test_orchestration_keeps_goal_from_history_on_short_follow_up():
+    ctx = SimpleNamespace(llm=_FakeLLM())
+    result = json.loads(
+        run_journeyfit_orchestration(
+            ctx,
+            {
+                "user_message": "29 anos",
+                "user_profile": {},
+                "conversation_history": [
+                    {
+                        "role": "user",
+                        "content": "gostaria de um treino, tenho 29 anos, peso 78kg e consigo treinar 5x por semana",
+                    }
+                ],
+            },
+        )
+    )
+
+    assert result["success"] is True
+    assert result["mode"] == "plan_ready"
+    assert result["selected_agents"] == ["personal_trainer"]
+    assert result["follow_up_questions"] == []
+    assert result["renderable_plan"]["training"]["weekly_frequency"] == 5
+
+
 def test_orchestration_understands_weight_written_as_quilos():
     ctx = SimpleNamespace(llm=_FakeLLM())
     result = json.loads(
@@ -825,6 +878,23 @@ def test_journeyfit_passthrough_wraps_plain_conversation_as_json():
         "follow_up_questions": [],
         "renderable_plan": None,
     }
+
+
+def test_journeyfit_passthrough_rewrites_needs_more_info_json_to_text():
+    result = passthrough_journeyfit_tool_result(
+        session_id="missing",
+        response_text=json.dumps(
+            {
+                "status": "needs_more_info",
+                "mode": "needs_more_info",
+                "user_facing_message": "Posso te perguntar algumas coisas para personalizar melhor?",
+                "follow_up_questions": ["Qual a sua idade?"],
+                "renderable_plan": None,
+            }
+        ),
+    )
+
+    assert result == "Posso te perguntar algumas coisas para personalizar melhor?"
 
 
 def test_slash_command_returns_intake_message():
